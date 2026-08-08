@@ -1,28 +1,84 @@
-#include "Common.h"
+ï»¿#include "Common.h"
 #include <iostream>
+#include <cctype>
+#include <string>
 
 #define SERVER_PORT 9000
 #define BUFFER_SIZE 4096
+#define RECEIVE_DIRECTORY "received_files"
 
 typedef struct {
 	char fileName[256];
 	long long fileSize;
 } FileInfo;
 
+bool IsReservedWindowsFileName(const std::string& fileName) {
+	size_t extensionPosition = fileName.find('.');
+	std::string baseName = fileName.substr(0, extensionPosition);
+	while (!baseName.empty() && baseName.back() == ' ') {
+		baseName.pop_back();
+	}
+	for (char& character : baseName) {
+		character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
+	}
+
+	if (baseName == "CON" || baseName == "PRN" || baseName == "AUX" || baseName == "NUL") {
+		return true;
+	}
+
+	return baseName.length() == 4
+		&& (baseName.compare(0, 3, "COM") == 0 || baseName.compare(0, 3, "LPT") == 0)
+		&& baseName[3] >= '1' && baseName[3] <= '9';
+}
+
+bool IsSafeFileName(const std::string& fileName) {
+	if (fileName.empty() || fileName == "." || fileName == "..") {
+		return false;
+	}
+
+	if (fileName.find_first_of("\\/:*?\"<>|") != std::string::npos
+		|| fileName.back() == '.' || fileName.back() == ' ') {
+		return false;
+	}
+
+	for (unsigned char character : fileName) {
+		if (character < 32) {
+			return false;
+		}
+	}
+
+	return !IsReservedWindowsFileName(fileName);
+}
+
+bool EnsureReceiveDirectory() {
+	if (CreateDirectoryA(RECEIVE_DIRECTORY, NULL)) {
+		return true;
+	}
+
+	if (GetLastError() != ERROR_ALREADY_EXISTS) {
+		return false;
+	}
+
+	DWORD attributes = GetFileAttributesA(RECEIVE_DIRECTORY);
+	return attributes != INVALID_FILE_ATTRIBUTES
+		&& (attributes & FILE_ATTRIBUTE_DIRECTORY)
+		&& !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
 int main() {
 
 	int retval;
 
-	// À©¼Ó ÃÊ±âÈ­
+	// ìœˆì† ì´ˆê¸°í™”
 	WSADATA wsa;
 	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-		std::cerr << "WSAStartup() ½ÇÆÐ" << std::endl;
+		std::cerr << "WSAStartup() ì‹¤íŒ¨" << std::endl;
 		return 1;
 	}
 
 	SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_sock == INVALID_SOCKET) {
-		std::cerr << "socket() »ý¼º ½ÇÆÐ" << std::endl;
+		std::cerr << "socket() ìƒì„± ì‹¤íŒ¨" << std::endl;
 		WSACleanup();
 		return 1;
 	}
@@ -34,7 +90,7 @@ int main() {
 	serveraddr.sin_port = htons(SERVER_PORT);
 	retval = bind(listen_sock, (SOCKADDR*)&serveraddr, sizeof(serveraddr));
 	if (retval == SOCKET_ERROR) {
-		std::cerr << "bind() ½ÇÆÐ" << std::endl;
+		std::cerr << "bind() ì‹¤íŒ¨" << std::endl;
 		closesocket(listen_sock);
 		WSACleanup();
 		return 1;
@@ -43,13 +99,13 @@ int main() {
 	// listen()
 	retval = listen(listen_sock, SOMAXCONN);
 	if (retval == SOCKET_ERROR) {
-		std::cerr << "listen() ½ÇÆÐ" << std::endl;
+		std::cerr << "listen() ì‹¤íŒ¨" << std::endl;
 		closesocket(listen_sock);
 		WSACleanup();
 		return 1;
 	}
 
-	std::cout << "ÆÄÀÏ ¼ö½Å ¼­¹ö°¡ ½ÃÀÛµÇ¾ú½À´Ï´Ù. Å¬¶óÀÌ¾ðÆ®ÀÇ Á¢¼ÓÀ» ±â´Ù¸³´Ï´Ù..." << std::endl;
+	std::cout << "íŒŒì¼ ìˆ˜ì‹  ì„œë²„ê°€ ì‹œìž‘ë˜ì—ˆìŠµë‹ˆë‹¤. í´ë¼ì´ì–¸íŠ¸ì˜ ì ‘ì†ì„ ê¸°ë‹¤ë¦½ë‹ˆë‹¤..." << std::endl;
 
 	SOCKET client_sock;
 	SOCKADDR_IN clientAddr;
@@ -59,54 +115,108 @@ int main() {
 	addrlen = sizeof(clientAddr);
 	client_sock = accept(listen_sock, (SOCKADDR*)&clientAddr, &addrlen);
 	if (client_sock == INVALID_SOCKET) {
-		std::cerr << "accept() ½ÇÆÐ" << std::endl;
+		std::cerr << "accept() ì‹¤íŒ¨" << std::endl;
 		closesocket(listen_sock);
 		WSACleanup();
 		return 1;
 	}
 
-	// Á¢¼ÓÇÑ Å¬¶óÀÌ¾ðÆ® Á¤º¸ Ãâ·Â
+	// ì ‘ì†í•œ í´ë¼ì´ì–¸íŠ¸ ì •ë³´ ì¶œë ¥
 	char addr[INET_ADDRSTRLEN];
 	inet_ntop(AF_INET, &clientAddr.sin_addr, addr, sizeof(addr));
-	std::cout << "\n[TCP ¼­¹ö] Å¬¶óÀÌ¾ðÆ® Á¢¼Ó: IP ÁÖ¼Ò=" << addr << ", Æ÷Æ® ¹øÈ£=" << ntohs(clientAddr.sin_port) << std::endl;
+	std::cout << "\n[TCP ì„œë²„] í´ë¼ì´ì–¸íŠ¸ ì ‘ì†: IP ì£¼ì†Œ=" << addr << ", í¬íŠ¸ ë²ˆí˜¸=" << ntohs(clientAddr.sin_port) << std::endl;
 
-	// µ¥ÀÌÅÍ Åë½Å   
+	// ë°ì´í„° í†µì‹ 
 	FileInfo fileInfo = {};
 
-	// °íÁ¤ Å©±â µ¥ÀÌÅÍ ¹Þ±â
+	// ê³ ì • í¬ê¸° ë°ì´í„° ë°›ê¸°
 	retval = recv(client_sock, (char*)&fileInfo, sizeof(FileInfo), MSG_WAITALL);
-	if (retval == SOCKET_ERROR) {
-		std::cerr << "°íÁ¤ µ¥ÀÌÅÍ ¼ö½Å¿¡ ½ÇÆÐ" << std::endl;
+	if (retval != static_cast<int>(sizeof(FileInfo))) {
+		std::cerr << "ê³ ì • ë°ì´í„° ìˆ˜ì‹ ì— ì‹¤íŒ¨" << std::endl;
+	}
+	else if (fileInfo.fileSize < 0) {
+		std::cerr << "ìž˜ëª»ëœ íŒŒì¼ í¬ê¸°ë¥¼ ìˆ˜ì‹ í–ˆìŠµë‹ˆë‹¤." << std::endl;
 	}
 	else {
-		std::cout << "¼ö½ÅÇÒ ÆÄÀÏ¸í: " << fileInfo.fileName	<< ", ÆÄÀÏ Å©±â: " << fileInfo.fileSize << " bytes" << std::endl;
-
-		// °¡º¯ µ¥ÀÌÅÍ ¹Þ±â
-		FILE* fp;
-		fp = fopen(fileInfo.fileName, "wb");
-		if (fp == NULL) {
-			std::cerr << "ÆÄÀÏÀ» »ý¼º ½ÇÆÐ " << std::endl;
+		const char* nullTerminator = static_cast<const char*>(memchr(fileInfo.fileName, '\0', sizeof(fileInfo.fileName)));
+		if (nullTerminator == NULL) {
+			std::cerr << "ì¢…ë£Œ ë¬¸ìžê°€ ì—†ëŠ” íŒŒì¼ëª…ì„ ê±°ë¶€í–ˆìŠµë‹ˆë‹¤." << std::endl;
 		}
 		else {
-			char buffer[BUFFER_SIZE];
-			long long totalReceived = 0;
-			while (totalReceived < fileInfo.fileSize) {
-				int recvCount = recv(client_sock, buffer, BUFFER_SIZE, 0);
-				if (recvCount <= 0) {
-					std::cerr << "\n¿¬°áÀÌ ²÷¾îÁü" << std::endl;
-					break;
+			std::string receivedFileName(fileInfo.fileName, nullTerminator - fileInfo.fileName);
+			if (!IsSafeFileName(receivedFileName)) {
+				std::cerr << "ë””ë ‰í„°ë¦¬ ìš”ì†Œ ë˜ëŠ” Windowsì—ì„œ í—ˆìš©ë˜ì§€ ì•ŠëŠ” íŒŒì¼ëª…ì„ ê±°ë¶€í–ˆìŠµë‹ˆë‹¤." << std::endl;
+			}
+			else if (!EnsureReceiveDirectory()) {
+				std::cerr << "ìˆ˜ì‹  ë””ë ‰í„°ë¦¬ë¥¼ ì¤€ë¹„í•˜ì§€ ëª»í–ˆìŠµë‹ˆë‹¤." << std::endl;
+			}
+			else {
+				std::string outputPath = std::string(RECEIVE_DIRECTORY) + "\\" + receivedFileName;
+				std::cout << "ìˆ˜ì‹ í•  íŒŒì¼ëª…: " << receivedFileName << ", íŒŒì¼ í¬ê¸°: " << fileInfo.fileSize << " bytes" << std::endl;
+
+				HANDLE fileHandle = CreateFileA(
+					outputPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW,
+					FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+				if (fileHandle == INVALID_HANDLE_VALUE) {
+					DWORD createError = GetLastError();
+					if (createError == ERROR_FILE_EXISTS || createError == ERROR_ALREADY_EXISTS) {
+						std::cerr << "ê°™ì€ ì´ë¦„ì˜ ìˆ˜ì‹  íŒŒì¼ì´ ì´ë¯¸ ìžˆì–´ ë®ì–´ì“°ì§€ ì•ŠìŠµë‹ˆë‹¤." << std::endl;
+					}
+					else {
+						std::cerr << "ìˆ˜ì‹  íŒŒì¼ ìƒì„±ì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤." << std::endl;
+					}
 				}
-				fwrite(buffer, 1, recvCount, fp);
-				totalReceived += recvCount;
+				else {
+					char buffer[BUFFER_SIZE];
+					long long totalReceived = 0;
+					bool receiveSucceeded = true;
+					while (totalReceived < fileInfo.fileSize) {
+						long long remainingBytes = fileInfo.fileSize - totalReceived;
+						int receiveSize = remainingBytes < BUFFER_SIZE
+							? static_cast<int>(remainingBytes) : BUFFER_SIZE;
+						int recvCount = recv(client_sock, buffer, receiveSize, 0);
+						if (recvCount <= 0) {
+							std::cerr << "\nì—°ê²°ì´ ëŠì–´ì§" << std::endl;
+							receiveSucceeded = false;
+							break;
+						}
 
-				int percentage = static_cast<int>((static_cast<double>(totalReceived) / fileInfo.fileSize) * 100.0);
-				std::cout << "\r¼ö½Å ÁøÇà·ü: " << percentage << "% (" << totalReceived << " / " << fileInfo.fileSize << " bytes) " << std::flush;
-			}
+						DWORD totalWritten = 0;
+						while (totalWritten < static_cast<DWORD>(recvCount)) {
+							DWORD writtenBytes = 0;
+							if (!WriteFile(fileHandle, buffer + totalWritten,
+								static_cast<DWORD>(recvCount) - totalWritten, &writtenBytes, NULL)
+								|| writtenBytes == 0) {
+								std::cerr << "\níŒŒì¼ ì €ìž¥ì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤." << std::endl;
+								receiveSucceeded = false;
+								break;
+							}
+							totalWritten += writtenBytes;
+						}
 
-			if (totalReceived >= fileInfo.fileSize) {
-				std::cout << "\nÆÄÀÏ ¼ö½ÅÀ» ¿Ï·áÇß½À´Ï´Ù." << std::endl;
+						if (!receiveSucceeded) {
+							break;
+						}
+
+						totalReceived += recvCount;
+						int percentage = static_cast<int>((static_cast<double>(totalReceived) / fileInfo.fileSize) * 100.0);
+						std::cout << "\rìˆ˜ì‹  ì§„í–‰ë¥ : " << percentage << "% (" << totalReceived << " / " << fileInfo.fileSize << " bytes) " << std::flush;
+					}
+
+					CloseHandle(fileHandle);
+					if (receiveSucceeded && totalReceived == fileInfo.fileSize) {
+						std::cout << "\níŒŒì¼ ìˆ˜ì‹ ì„ ì™„ë£Œí–ˆìŠµë‹ˆë‹¤: " << outputPath << std::endl;
+					}
+					else {
+						if (DeleteFileA(outputPath.c_str())) {
+							std::cerr << "ë¶ˆì™„ì „í•œ ìˆ˜ì‹  íŒŒì¼ì„ ì œê±°í–ˆìŠµë‹ˆë‹¤." << std::endl;
+						}
+						else {
+							std::cerr << "ë¶ˆì™„ì „í•œ ìˆ˜ì‹  íŒŒì¼ì„ ì œê±°í•˜ì§€ ëª»í–ˆìŠµë‹ˆë‹¤." << std::endl;
+						}
+					}
+				}
 			}
-			fclose(fp);
 		}
 	}
 
